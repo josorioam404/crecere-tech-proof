@@ -4,9 +4,15 @@ Transcriptor y Diarizador de Audios con Deepgram nova-3
 Procesa llamadas de audio (.wav) tanto humanas como de IA, aplicando
 diarización de hablantes y extrayendo transcripciones estructuradas.
 
-Cumple con la arquitectura de 3 capas:
-1. data/raw_transcripts/{id}.json (Caché e idempotencia de Deepgram)
-2. data/transcripts/{id}.md       (Diálogo formateado por turnos)
+Clasificación de roles avanzada:
+- Agente: Basado en frases institucionales de IA ("área de embargos, judicializaciones...")
+          y vocabulario especializado en humanas ("obligación", "acuerdos de pago", "cartera"...).
+- Cliente: Interlocutor principal que responde a la gestión.
+- Otro: Sistemas automáticos (IVR, buzón de voz, "marque 1...") o terceros que intervienen.
+
+Arquitectura de 3 capas:
+1. data/raw_transcripts/{call_id}.json (Caché e idempotencia de Deepgram)
+2. data/transcripts/{call_id}.md       (Diálogo formateado por turnos)
 3. data/processed/transcripts_summary.csv / .parquet (Metadatos analíticos)
 """
 
@@ -33,6 +39,34 @@ RAW_DIR = DATA_DIR / "raw_transcripts"
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 PROCESSED_DIR = DATA_DIR / "processed"
 
+# Vocabulario de IVR / Buzón de voz / Grabadoras
+IVR_KEYWORDS = [
+    "marque 1", "marque 2", "marque 3", "marque 4",
+    "para las opciones de entrega", "opciones de entrega",
+    "su grabación llegó", "su grabacion llego", "tiempo límite", "tiempo limite",
+    "buzón de voz", "buzon de voz", "deje su mensaje", "después del tono", "despues del tono",
+    "la llamada será transferida", "la llamada sera transferida",
+    "casilla de voz", "casilla de mensajes", "número que usted marcó", "numero que usted marco"
+]
+
+# Vocabulario de Agente IA
+AI_AGENT_KEYWORDS = [
+    "embargos", "judicializaciones", "alivios financieros",
+    "área de embargos", "area de embargos", "le llamo del area"
+]
+
+# Vocabulario especializado de Agente Humano en cobranzas
+HUMAN_AGENT_KEYWORDS = [
+    "obligación", "obligacion", "obligaciones",
+    "acuerdos de pago", "acuerdo de pago",
+    "le hablo", "me comunico", "nos comunicamos",
+    "tengo el gusto de hablar con", "me estoy comunicando",
+    "dueños", "dueña", "dueño", "crediticio", "crediticia",
+    "cartera", "cómo se encuentra", "como se encuentra",
+    "podría confirmarme", "podria confirmarme",
+    "hablo con", "me confirma"
+]
+
 
 def load_api_key() -> str:
     """
@@ -43,7 +77,6 @@ def load_api_key() -> str:
     if key and key.strip():
         return key.strip()
 
-    # Carga desde .env si existe
     env_file = BASE_DIR / ".env"
     if env_file.exists():
         with open(env_file, "r", encoding="utf-8") as f:
@@ -55,7 +88,6 @@ def load_api_key() -> str:
                         os.environ["DEEPGRAM_API_KEY"] = val
                         return val
 
-    # Fallback a deepgram_secret.txt si existiese
     secret_file = BASE_DIR / "deepgram_secret.txt"
     if secret_file.exists():
         val = secret_file.read_text(encoding="utf-8").strip()
@@ -78,6 +110,7 @@ def setup_directories() -> None:
 def transcribe_audio_file(
     client: httpx.Client,
     file_path: Path,
+    call_id: str,
     api_key: str,
     max_retries: int = 3
 ) -> Dict[str, Any]:
@@ -85,8 +118,7 @@ def transcribe_audio_file(
     Envía un archivo de audio a Deepgram API con el modelo nova-3 y diarización activada.
     Implementa reintentos con backoff exponencial.
     """
-    audio_id = file_path.stem
-    cache_path = RAW_DIR / f"{audio_id}.json"
+    cache_path = RAW_DIR / f"{call_id}.json"
 
     # Capa 1: Retornar de caché si ya existe y es válido
     if cache_path.exists():
@@ -125,7 +157,6 @@ def transcribe_audio_file(
             )
             if response.status_code == 200:
                 result = response.json()
-                # Guardar en Capa 1
                 with open(cache_path, "w", encoding="utf-8") as f_out:
                     json.dump(result, f_out, ensure_ascii=False, indent=2)
                 return result
@@ -139,7 +170,7 @@ def transcribe_audio_file(
             last_err = str(e)
             time.sleep(attempt * 2)
 
-    raise RuntimeError(f"Fallo al transcribir {file_path.name}: {last_err}")
+    raise RuntimeError(f"Fallo al transcribir {file_path.name} ({call_id}): {last_err}")
 
 
 def format_seconds(seconds: float) -> str:
@@ -149,57 +180,175 @@ def format_seconds(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
-def determine_speaker_roles(utterances: List[Dict[str, Any]], source_type: str) -> Tuple[int, int]:
+def classify_speakers(
+    utterances: List[Dict[str, Any]],
+    source_type: str
+) -> Dict[int, str]:
     """
-    Identifica qué speaker id corresponde al Agente y cuál al Cliente.
-
-    Reglas:
-    - En llamadas de IA: La IA invariablemente dice frases institucionales como:
-      'le llamo del area de embargos, judicializaciones y alivios financieros'.
-      Identificamos al hablante que pronuncia estas palabras como el Agente IA.
-    - En llamadas Humanas: No hay una frase específica. Se utiliza la heurística de apertura:
-      el hablante que inicia o pregunta por el titular en los primeros turnos es clasificado
-      como Agente.
+    Clasifica a cada hablante detectado en:
+    - 'Agente'
+    - 'Cliente'
+    - 'Otro' (Buzón, IVR, contestadora o tercero)
     """
     if not utterances:
-        return 0, 1
+        return {0: "Agente"}
+
+    speakers = sorted(list({u.get("speaker", 0) for u in utterances}))
+
+    # 1. Agrupar texto completo por hablante
+    speaker_texts = {s: [] for s in speakers}
+    speaker_word_counts = {s: 0 for s in speakers}
+    for u in utterances:
+        spk = u.get("speaker", 0)
+        txt = u.get("transcript", "")
+        speaker_texts[spk].append(txt)
+        speaker_word_counts[spk] += len(txt.split())
+
+    full_texts = {s: " ".join(speaker_texts[s]).lower() for s in speakers}
+
+    # 2. Identificar hablantes tipo IVR / Buzón / Grabadora -> 'Otro'
+    is_ivr = {}
+    for s in speakers:
+        text = full_texts[s]
+        is_ivr[s] = any(kw in text for kw in IVR_KEYWORDS)
+
+    # Si todos los hablantes son IVR, o el único hablante es IVR -> 'Otro'
+    if all(is_ivr[s] for s in speakers):
+        return {s: "Otro" for s in speakers}
+
+    # 3. Identificar Agente
+    agent_id = None
+
+    if source_type == "ia":
+        # En IA, buscar frase insignia
+        for s in speakers:
+            if not is_ivr[s] and any(kw in full_texts[s] for kw in AI_AGENT_KEYWORDS):
+                agent_id = s
+                break
+        if agent_id is None:
+            # Fallback en IA: el hablante no-IVR que más habla en los turnos iniciales
+            candidates = [s for s in speakers if not is_ivr[s]]
+            agent_id = candidates[0] if candidates else speakers[0]
+    else:
+        # En llamadas humanas: puntuar con términos específicos de agentes de cobranza
+        scores = {}
+        for s in speakers:
+            if is_ivr[s]:
+                scores[s] = -100
+                continue
+            text = full_texts[s]
+            score = 0
+            for kw in HUMAN_AGENT_KEYWORDS:
+                score += text.count(kw) * 3
+
+            # Bonificación por iniciativa de apertura (primeros turnos)
+            for idx, u in enumerate(utterances[:3]):
+                if u.get("speaker", 0) == s:
+                    score += (3 - idx) * 2
+
+            scores[s] = score
+
+        best_spk = max(scores, key=scores.get)
+        agent_id = best_spk if scores[best_spk] > -50 else speakers[0]
+
+    # 4. Asignar roles finales
+    roles = {}
+    roles[agent_id] = "Agente"
+
+    remaining_speakers = [s for s in speakers if s != agent_id]
+
+    # Clasificar el resto
+    primary_customer_id = None
+    max_customer_words = -1
+
+    for s in remaining_speakers:
+        if is_ivr[s]:
+            roles[s] = "Otro"
+        else:
+            # Candidato a cliente principal: quien tiene mayor interacción
+            if speaker_word_counts[s] > max_customer_words:
+                max_customer_words = speaker_word_counts[s]
+                primary_customer_id = s
+
+    if primary_customer_id is not None:
+        roles[primary_customer_id] = "Cliente"
+
+    # Cualquier otro hablante adicional no-IVR ni cliente principal -> 'Otro'
+    for s in remaining_speakers:
+        if s not in roles:
+            roles[s] = "Otro"
+
+    return roles
+
+
+def separate_single_speaker_dialogue(
+    utterances: List[Dict[str, Any]],
+    source_type: str
+) -> List[Dict[str, Any]]:
+    """
+    Si Deepgram agrupó toda la llamada bajo un solo hablante (speaker 0),
+    pero la conversación contiene respuestas evidentes del cliente,
+    desdobla los turnos asignando speaker 0 (Agente) y speaker 1 (Cliente).
+    """
+    if source_type != "humano" or not utterances:
+        return utterances
 
     speakers = list({u.get("speaker", 0) for u in utterances})
-    if len(speakers) <= 1:
-        return (speakers[0] if speakers else 0), -1
+    if len(speakers) > 1:
+        return utterances
 
-    # Regla específica para IA
-    if source_type == "ia":
-        ai_keywords = ["embargos", "judicializaciones", "alivios financieros", "área de embargos", "area de embargos"]
-        for u in utterances:
-            text = u.get("transcript", "").lower()
-            if any(kw in text for kw in ai_keywords):
-                agent_id = u.get("speaker", 0)
-                customer_candidates = [s for s in speakers if s != agent_id]
-                return agent_id, (customer_candidates[0] if customer_candidates else -1)
+    # Frases típicas de respuestas del cliente en cobranzas
+    CLIENT_TRIGGER_PATTERNS = [
+        "con ella", "con él", "con el", "quién la necesita", "quien la necesita",
+        "quién habla", "quien habla", "de parte de quién", "de parte de quien",
+        "sí, con ella", "si, con ella", "sí con ella", "sí, con él",
+        "no pude hacer el pago", "se me presentó una calamidad", "se me presento una calamidad",
+        "no tengo dinero", "no tengo plata", "no cuento con", "estoy desempleado",
+        "a mí me pagan", "a mi me pagan"
+    ]
 
-    # Heurística para llamadas humanas (o fallback en IA si no se detectó la frase)
-    speaker_scores = {s: 0 for s in speakers}
-    for idx, u in enumerate(utterances[:4]):
-        text = u.get("transcript", "").lower()
-        spk = u.get("speaker", 0)
-        # Quien habla de primero tiene una probabilidad natural más alta de apertura
-        if idx == 0:
-            speaker_scores[spk] += 2
-        # Patrones comunes de apertura de cobranza humana
-        if "me comunico" in text or "hablo con" in text or "le llamo" in text:
-            speaker_scores[spk] += 4
+    has_client_cue = False
+    for u in utterances:
+        txt = u.get("transcript", "").lower()
+        if any(pat in txt for pat in CLIENT_TRIGGER_PATTERNS):
+            has_client_cue = True
+            break
 
-    agent_id = max(speaker_scores, key=speaker_scores.get)
-    customer_candidates = [s for s in speakers if s != agent_id]
-    customer_id = customer_candidates[0] if customer_candidates else -1
+    if not has_client_cue:
+        return utterances
 
-    return agent_id, customer_id
+    # Desdoblar turnos conversacionales
+    new_utterances = []
+    current_spk = 0  # El agente suele iniciar el saludo institucional
+
+    for u in utterances:
+        u_copy = dict(u)
+        txt = u.get("transcript", "").strip()
+        txt_lower = txt.lower()
+
+        # Si coincide con patrón de cliente
+        if any(pat in txt_lower for pat in ["con ella", "con él", "con el", "quién la necesita", "quien la necesita", "sí, con ella", "no pude hacer", "calamidad", "no tengo", "desempleado"]):
+            current_spk = 1
+        # Si coincide con patrón de agente
+        elif any(pat in txt_lower for pat in ["me estoy comunicando", "me comunico", "le habla", "obligación", "acuerdo de pago", "compromiso de pago", "compramos la cartera"]):
+            current_spk = 0
+
+        u_copy["speaker"] = current_spk
+        new_utterances.append(u_copy)
+
+        # Transición conversacional natural tras una pregunta del agente
+        if current_spk == 0 and (txt.endswith("?") or "¿" in txt):
+            current_spk = 1
+        elif current_spk == 1 and not (txt.endswith("?") or "¿" in txt):
+            current_spk = 0
+
+    return new_utterances
 
 
 def process_and_save_dialogue(
     raw_data: Dict[str, Any],
-    audio_id: str,
+    call_id: str,
+    original_audio_file: str,
     source_type: str
 ) -> Dict[str, Any]:
     """
@@ -211,7 +360,7 @@ def process_and_save_dialogue(
     metadata = raw_data.get("metadata", {})
     duration = metadata.get("duration", 0.0)
 
-    # Si no hay utterances pero hay canales
+    # Si no hay utterances pero hay alternativas de canales
     if not utterances:
         channels = results.get("channels", [{}])
         alt = channels[0].get("alternatives", [{}])[0]
@@ -224,24 +373,27 @@ def process_and_save_dialogue(
             "confidence": alt.get("confidence", 0.0)
         }]
 
-    agent_id, customer_id = determine_speaker_roles(utterances, source_type)
+    # Desdoblar hablantes si Deepgram unificó erróneamente en speaker 0 en llamadas humanas
+    utterances = separate_single_speaker_dialogue(utterances, source_type)
+    speaker_roles = classify_speakers(utterances, source_type)
 
+    # Construir encabezado
     dialogue_lines = [
-        f"# Transcripción de Llamada — {audio_id}",
+        f"# Transcripción de Llamada — {call_id}",
+        f"- **ID de Llamada:** `{call_id}`",
+        f"- **Archivo Original:** `{original_audio_file}`",
         f"- **Origen:** {source_type.upper()}",
         f"- **Duración:** {format_seconds(duration)} ({duration:.1f} s)",
-        f"- **Hablante Agente Identificado:** Hablante {agent_id}",
-        f"- **Hablante Cliente Identificado:** Hablante {customer_id if customer_id != -1 else 'No detectado'}",
-        "",
-        "## Diálogo",
-        ""
+        f"- **Hablantes Detectados:**"
     ]
+    for spk_id, role in speaker_roles.items():
+        dialogue_lines.append(f"  - Hablante {spk_id}: **{role}**")
+
+    dialogue_lines.extend(["", "## Diálogo", ""])
 
     total_words = 0
-    agent_words = 0
-    customer_words = 0
-    agent_talk_time = 0.0
-    customer_talk_time = 0.0
+    words_by_role = {"Agente": 0, "Cliente": 0, "Otro": 0}
+    time_by_role = {"Agente": 0.0, "Cliente": 0.0, "Otro": 0.0}
     confidences = []
 
     for u in utterances:
@@ -256,37 +408,36 @@ def process_and_save_dialogue(
         words_count = len(text.split())
         total_words += words_count
 
-        if spk == agent_id:
-            role_label = "Agente"
-            agent_words += words_count
-            agent_talk_time += u_duration
-        elif spk == customer_id:
-            role_label = "Cliente"
-            customer_words += words_count
-            customer_talk_time += u_duration
-        else:
-            role_label = f"Hablante {spk}"
+        role = speaker_roles.get(spk, "Otro")
+        words_by_role[role] = words_by_role.get(role, 0) + words_count
+        time_by_role[role] = time_by_role.get(role, 0.0) + u_duration
 
-        dialogue_lines.append(f"**[{format_seconds(start)} - {format_seconds(end)}] {role_label}:** {text}")
+        dialogue_lines.append(f"**[{format_seconds(start)} - {format_seconds(end)}] {role}:** {text}")
 
-    # Guardar en Capa 2
-    md_path = TRANSCRIPTS_DIR / f"{audio_id}.md"
+    # Guardar en Capa 2 con el call_id estandarizado
+    md_path = TRANSCRIPTS_DIR / f"{call_id}.md"
     with open(md_path, "w", encoding="utf-8") as f_out:
         f_out.write("\n".join(dialogue_lines))
 
-    unique_speakers = len({u.get("speaker", 0) for u in utterances})
+    unique_speakers = len(speaker_roles)
+    roles_list = sorted(list(set(speaker_roles.values())))
 
     return {
-        "audio_id": audio_id,
+        "call_id": call_id,
+        "original_audio_file": original_audio_file,
         "source": source_type,
         "duration_seconds": round(duration, 2),
         "total_words": total_words,
-        "agent_words": agent_words,
-        "customer_words": customer_words,
-        "agent_talk_time_seconds": round(agent_talk_time, 2),
-        "customer_talk_time_seconds": round(customer_talk_time, 2),
-        "talk_ratio_agent": round(agent_talk_time / duration, 4) if duration > 0 else 0.0,
+        "agent_words": words_by_role.get("Agente", 0),
+        "customer_words": words_by_role.get("Cliente", 0),
+        "other_words": words_by_role.get("Otro", 0),
+        "agent_talk_time_seconds": round(time_by_role.get("Agente", 0.0), 2),
+        "customer_talk_time_seconds": round(time_by_role.get("Cliente", 0.0), 2),
+        "other_talk_time_seconds": round(time_by_role.get("Otro", 0.0), 2),
+        "talk_ratio_agent": round(time_by_role.get("Agente", 0.0) / duration, 4) if duration > 0 else 0.0,
         "num_speakers": unique_speakers,
+        "has_other_speaker": "Otro" in roles_list,
+        "roles_detected": ", ".join(roles_list),
         "num_utterances": len(utterances),
         "mean_confidence": round(sum(confidences) / len(confidences), 4) if confidences else 0.0
     }
@@ -294,8 +445,9 @@ def process_and_save_dialogue(
 
 def run_pipeline(limit: Optional[int] = None) -> pd.DataFrame:
     """
-    Ejecuta el pipeline completo para todos los audios de ambas carpetas.
-    Si limit se especifica, procesa solo esa cantidad de cada categoría para test.
+    Ejecuta el pipeline completo para todos los audios con nomenclatura estandarizada:
+    humano_01 .. humano_50 y ia_01 .. ia_50.
+    Aprovecha la caché de Deepgram existente en data/raw_transcripts/ para no volver a gastar saldo.
     """
     setup_directories()
     api_key = load_api_key()
@@ -307,19 +459,21 @@ def run_pipeline(limit: Optional[int] = None) -> pd.DataFrame:
         human_files = human_files[:limit]
         ai_files = ai_files[:limit]
 
-    all_tasks = [(f, "humano") for f in human_files] + [(f, "ia") for f in ai_files]
+    human_tasks = [(f, "humano", f"humano_{idx + 1:02d}") for idx, f in enumerate(human_files)]
+    ai_tasks = [(f, "ia", f"ia_{idx + 1:02d}") for idx, f in enumerate(ai_files)]
+    all_tasks = human_tasks + ai_tasks
+
     print(f"Total de audios a procesar: {len(all_tasks)} (Humanos: {len(human_files)}, IA: {len(ai_files)})")
 
     summary_records = []
     with httpx.Client() as client:
-        for file_path, source in tqdm(all_tasks, desc="Transcribiendo con Deepgram nova-3"):
-            audio_id = file_path.stem
+        for file_path, source, call_id in tqdm(all_tasks, desc="Procesando y clasificando con Deepgram nova-3"):
             try:
-                raw_json = transcribe_audio_file(client, file_path, api_key)
-                meta = process_and_save_dialogue(raw_json, audio_id, source)
+                raw_json = transcribe_audio_file(client, file_path, call_id, api_key)
+                meta = process_and_save_dialogue(raw_json, call_id, file_path.name, source)
                 summary_records.append(meta)
             except Exception as err:
-                print(f"Error procesando {file_path.name}: {err}", file=sys.stderr)
+                print(f"Error procesando {file_path.name} ({call_id}): {err}", file=sys.stderr)
 
     df_summary = pd.DataFrame(summary_records)
 
@@ -340,6 +494,5 @@ def run_pipeline(limit: Optional[int] = None) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    # Permite pasar argumento opcional para prueba (--test)
     test_mode = "--test" in sys.argv
     run_pipeline(limit=1 if test_mode else None)
