@@ -1,0 +1,43 @@
+# Secretos y credenciales
+*secret*
+*key*
+.env*
+deepgram_secret.txt
+
+# Archivos de audio (crudos y procesados)
+audios/
+*.wav
+*.mp3
+*.ogg
+*.flac
+*.m4a
+
+# Datos locales, transcripciones y base de datos
+data/
+transcripts/
+transcripciones/
+*.parquet
+*.duckdb
+*.sqlite
+*.sqlite3
+
+# Documentos del reto excluidos de tracking
+Prueba técnica Creceré AI.html
+analisis_prueba_tecnica.md
+
+# Python y entornos virtuales
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs y SO
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+.ipynb_checkpoints/
