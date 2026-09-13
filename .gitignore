@@ -1,7 +1,10 @@
 # Secretos y credenciales
 *secret*
 *key*
-.env*
+.env
+.env.local
+.env.*.local
+!.env.example
 deepgram_secret.txt
 
 # Archivos de audio (crudos y procesados)
