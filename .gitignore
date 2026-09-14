@@ -6,6 +6,7 @@
 .env.*.local
 !.env.example
 deepgram_secret.txt
+grok_secret.txt
 
 # Archivos de audio (crudos y procesados)
 audios/
