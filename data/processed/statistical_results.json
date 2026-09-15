@@ -1,0 +1,255 @@
+{
+  "funnel": {
+    "total_calls": 100,
+    "humanos": {
+      "total": 50,
+      "rpc_count": 37,
+      "rpc_rate": 0.74,
+      "ci_95": [
+        0.6045,
+        0.8413
+      ],
+      "ptp_count": 23,
+      "ptp_rate_given_rpc": 0.6216
+    },
+    "ia": {
+      "total": 50,
+      "rpc_count": 24,
+      "rpc_rate": 0.48,
+      "ci_95": [
+        0.348,
+        0.6149
+      ],
+      "ptp_count": 12,
+      "ptp_rate_given_rpc": 0.5
+    },
+    "diff_pp": 26.0,
+    "chi2_stat": 6.053,
+    "chi2_p_value": 0.013882977817291347,
+    "fisher_p_value": 0.0133997915679029,
+    "odds_ratio": 3.0833,
+    "is_significant_05": true
+  },
+  "h1_alternativas": {
+    "humanos": {
+      "n": 37,
+      "mean": 1.946,
+      "std": 2.223,
+      "median": 2.0,
+      "iqr": 3.0,
+      "shapiro_p": 8.434459025744072e-07
+    },
+    "ia": {
+      "n": 24,
+      "mean": 1.875,
+      "std": 0.537,
+      "median": 2.0,
+      "iqr": 0.0,
+      "shapiro_p": 1.4321932776916698e-05
+    },
+    "mann_whitney_u": 387.0,
+    "p_value_one_sided": 0.8125146466800757,
+    "p_value_two_sided": 0.3833331028520801,
+    "cliffs_delta": -0.1284,
+    "cliffs_delta_interpretation": "Despreciable",
+    "h1_supported": false
+  },
+  "h2_claridad": {
+    "humanos": {
+      "n": 37,
+      "mean": 0.7136,
+      "median": 1.0,
+      "std": 0.3453,
+      "prop_cero_repeticiones": 0.5676,
+      "ci_95_prop": [
+        0.4091,
+        0.7133
+      ]
+    },
+    "ia": {
+      "n": 24,
+      "mean": 0.5847,
+      "median": 0.5,
+      "std": 0.3119,
+      "prop_cero_repeticiones": 0.3333,
+      "ci_95_prop": [
+        0.1797,
+        0.5329
+      ]
+    },
+    "mann_whitney_u": 363.5,
+    "p_value_one_sided": 0.8987932171501399,
+    "p_value_two_sided": 0.2080418145110159,
+    "cliffs_delta": -0.1813,
+    "cliffs_delta_interpretation": "Pequeño",
+    "fisher_prop_cero_rep_p": 0.9805843212613164,
+    "diff_prop_cero_rep_pp": -23.42,
+    "h2_supported": false
+  },
+  "h3_objeciones": {
+    "subsample_with_objections": {
+      "total": 45,
+      "humanos": 26,
+      "ia": 19
+    },
+    "resolution_rate": {
+      "humanos_mean": 0.6731,
+      "humanos_median": 1.0,
+      "ia_mean": 0.4123,
+      "ia_median": 0.0,
+      "mann_whitney_u": 316.5,
+      "p_value_one_sided": 0.03931373511106196,
+      "cliffs_delta": 0.2814,
+      "cliffs_delta_interpretation": "Pequeño"
+    },
+    "ptp_conversion_conditional": {
+      "humanos_ptp_rate": 0.5385,
+      "humanos_count": 14,
+      "ia_ptp_rate": 0.4211,
+      "ia_count": 8,
+      "diff_pp": 11.74,
+      "odds_ratio": 1.6042,
+      "relative_risk": 1.2788,
+      "fisher_p_value": 0.3173495366203973
+    },
+    "h3_supported": true
+  },
+  "h4_tono": {
+    "entropy_shannon_bits": {
+      "humanos": 1.2488,
+      "ia": 1.1964,
+      "diff_bits": 0.0523
+    },
+    "contingency_table": {
+      "humano": {
+        "empatico_profesional": 18,
+        "neutro_formal": 17,
+        "rigido_robotico": 2
+      },
+      "ia": {
+        "empatico_profesional": 10,
+        "neutro_formal": 13,
+        "rigido_robotico": 1
+      }
+    },
+    "chi2_stat": 0.4001,
+    "chi2_p_value": 0.8187066059697822,
+    "degrees_of_freedom": 2,
+    "human_tones_breakdown": {
+      "empatico_profesional": 48.6,
+      "neutro_formal": 45.9,
+      "rigido_robotico": 5.4
+    },
+    "ia_tones_breakdown": {
+      "neutro_formal": 54.2,
+      "empatico_profesional": 41.7,
+      "rigido_robotico": 4.2
+    },
+    "h4_supported": false
+  },
+  "h5_monopolizacion": {
+    "humanos": {
+      "n": 37,
+      "mean": 0.495,
+      "std": 0.1129,
+      "median": 0.4955,
+      "shapiro_p": 0.5007822427421132,
+      "severe_monopolization_count": 0,
+      "severe_monopolization_rate": 0.0
+    },
+    "ia": {
+      "n": 24,
+      "mean": 0.462,
+      "std": 0.1227,
+      "median": 0.4574,
+      "shapiro_p": 0.6653226456293372,
+      "severe_monopolization_count": 0,
+      "severe_monopolization_rate": 0.0
+    },
+    "welch_t_stat": -1.0571,
+    "welch_p_value_one_sided": 0.8520285438484035,
+    "mann_whitney_u": 381.0,
+    "mann_whitney_p_one_sided": 0.8257473380392,
+    "cohens_d": -0.2821,
+    "hedges_g": -0.2785,
+    "effect_size_interpretation": "Pequeño",
+    "severe_fisher_p_value": 1.0,
+    "winsorization_note": "Winsorización al percentil 99 aplicada para mitigar distorsiones por valores atípicos",
+    "h5_supported": false
+  },
+  "econometric_model": {
+    "n_observations": 61,
+    "bivariate_model": {
+      "formula": "y ~ is_ia",
+      "is_ia_odds_ratio": 0.6087,
+      "is_ia_p_value": 0.34950365108549164,
+      "is_ia_ci_95_or": [
+        0.2151,
+        1.7222
+      ],
+      "pseudo_r2": 0.0106
+    },
+    "multivariate_model": {
+      "formula": "y ~ is_ia + alternativas_ofrecidas + claridad_mensaje + talk_ratio_agente + num_objeciones",
+      "pseudo_r2": 0.1023,
+      "ll_null": -41.6156,
+      "ll_model": -37.3573,
+      "coefficients": {
+        "Intercept": {
+          "coef": 0.9339,
+          "odds_ratio": 2.5444,
+          "p_value": 0.5186727328926736,
+          "ci_95_or": [
+            0.1492,
+            43.3799
+          ]
+        },
+        "is_ia": {
+          "coef": -0.8807,
+          "odds_ratio": 0.4145,
+          "p_value": 0.1453368108059373,
+          "ci_95_or": [
+            0.1267,
+            1.3562
+          ]
+        },
+        "alternativas_ofrecidas": {
+          "coef": 0.7338,
+          "odds_ratio": 2.0831,
+          "p_value": 0.0422479376327978,
+          "ci_95_or": [
+            1.026,
+            4.2291
+          ]
+        },
+        "claridad_mensaje": {
+          "coef": -0.337,
+          "odds_ratio": 0.7139,
+          "p_value": 0.7004261751767151,
+          "ci_95_or": [
+            0.1283,
+            3.9733
+          ]
+        },
+        "talk_ratio_agente": {
+          "coef": -1.0996,
+          "odds_ratio": 0.333,
+          "p_value": 0.6718227586420954,
+          "ci_95_or": [
+            0.0021,
+            53.9325
+          ]
+        },
+        "num_objeciones": {
+          "coef": -0.4227,
+          "odds_ratio": 0.6553,
+          "p_value": 0.029284392765817076,
+          "ci_95_or": [
+            0.4481,
+            0.9583
+          ]
+        }
+      }
+    }
+  }
+}

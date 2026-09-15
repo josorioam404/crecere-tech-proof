@@ -23,9 +23,10 @@ audios/**
 data/**
 !data/**/
 !data/**/.gitkeep
+!data/processed/**
+!data/logo_uri.txt
 /transcripts/
 transcripciones/
-*.parquet
 *.duckdb
 *.sqlite
 *.sqlite3
@@ -33,6 +34,8 @@ transcripciones/
 # Documentos del reto excluidos de tracking
 Prueba técnica Creceré AI.html
 analisis_prueba_tecnica.md
+PRUEBA TECNICA*.html
+reporte_ejecutivo.html
 
 # Python y entornos virtuales
 __pycache__/
