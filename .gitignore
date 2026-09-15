@@ -7,6 +7,7 @@
 !.env.example
 deepgram_secret.txt
 grok_secret.txt
+implementation_plan.md
 
 # Archivos de audio (crudos y procesados)
 audios/
