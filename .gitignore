@@ -10,7 +10,9 @@ grok_secret.txt
 implementation_plan.md
 
 # Archivos de audio (crudos y procesados)
-audios/
+audios/**
+!audios/**/
+!audios/**/.gitkeep
 *.wav
 *.mp3
 *.ogg
@@ -18,8 +20,10 @@ audios/
 *.m4a
 
 # Datos locales, transcripciones y base de datos
-data/
-transcripts/
+data/**
+!data/**/
+!data/**/.gitkeep
+/transcripts/
 transcripciones/
 *.parquet
 *.duckdb
