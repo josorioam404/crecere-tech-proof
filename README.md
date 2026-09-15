@@ -107,7 +107,9 @@ Debido a que la diarización acústica pura asigna etiquetas numéricas genéric
 | **$H_5$: Monopolización**| `talk_ratio_agente` | Media: 49.5% | Media: 46.2% | Welch's $t = -1.06$ | 0.8520 | Hedges' $g = -0.279$ (Pequeño) | **No confirmada** |
 
 ### Modelo Econométrico Multivariado: Determinantes de la Promesa de Pago
-$$\text{logit}(P(\text{PTP}=1)) = \beta_0 + \beta_1 \cdot \text{is\_ia} + \beta_2 \cdot \text{alternativas} + \beta_3 \cdot \text{claridad} + \beta_4 \cdot \text{talk\_ratio} + \beta_5 \cdot \text{num\_objeciones}$$
+```text
+logit(P(PTP=1)) = β₀ + β₁·is_ia + β₂·alternativas + β₃·claridad + β₄·talk_ratio + β₅·num_objeciones
+```
 
 * **Efecto Alternativas ($\beta_2 = +0.7338$):** **$\text{Odds Ratio} = 2.083$** ($p = 0.0422$*, IC 95%: $[1.026, 4.229]$). Cada alternativa ofrecida **duplica las probabilidades relativas de pago**.
 * **Efecto Resistencia ($\beta_5 = -0.4227$):** **$\text{Odds Ratio} = 0.655$** ($p = 0.0293$*). Cada objeción reduce las odds de acuerdo en un $34.5\%$.
@@ -169,16 +171,19 @@ Para ejecutar el pipeline desde cero se requiere:
    ```
 2. **Ejecutar el pipeline secuencialmente:**
    ```bash
-   # 1. Transcribir audios y generar diálogos con roles
+   # 1. Transcribir audios brutos con Deepgram nova-3
    python src/transcriber.py
 
-   # 2. Extraer variables semánticas estructuradas con LLM
+   # 2. Parsear diarización, clasificar roles y generar diálogos formateados
+   python src/diarization_parser.py
+
+   # 3. Extraer variables semánticas estructuradas con LLM (Groq)
    python src/feature_extractor.py
 
-   # 3. Ejecutar análisis estadístico y modelo econométrico
+   # 4. Ejecutar batería de tests de hipótesis y modelo econométrico
    python src/statistical_analysis.py
 
-   # 4. Compilar el reporte ejecutivo final en HTML (2 páginas)
+   # 5. Compilar el reporte ejecutivo final en HTML (2 páginas)
    python src/generate_report.py --output reporte_ejecutivo.html
    ```
 
