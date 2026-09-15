@@ -170,6 +170,121 @@ def setup_directories() -> None:
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
 
+
+# ── Chunking de Transcripts Largos ────────────────────────────────────────────
+
+CHUNK_SIZE_CHARS = 3200   # Balance óptimo entre contexto y límite de TPM de Groq (8,000 TPM)
+OVERLAP_TURNS = 2         # Turnos solapados entre chunks para preservar contexto
+
+def split_transcript_into_chunks(text: str, chunk_size: int = CHUNK_SIZE_CHARS, overlap: int = OVERLAP_TURNS) -> List[str]:
+    """
+    Divide un transcript Markdown en chunks por turnos de diálogo.
+    Cada turno comienza con '**['. Los chunks se solapan `overlap` turnos
+    para preservar el contexto entre fragmentos.
+    Retorna una lista de strings; si el texto cabe en un solo chunk, retorna [text].
+    """
+    if len(text) <= chunk_size:
+        return [text]
+
+    # Extraer encabezado (hasta "## Diálogo")
+    header_end = text.find("## Diálogo")
+    if header_end == -1:
+        header = ""
+        body = text
+    else:
+        header = text[:header_end + len("## Diálogo") + 1]
+        body = text[header_end + len("## Diálogo") + 1:]
+
+    # Dividir el body en turnos individuales
+    turns = []
+    current = []
+    for line in body.splitlines(keepends=True):
+        if line.startswith("**[") and current:
+            turns.append("".join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        turns.append("".join(current))
+
+    if not turns:
+        return [text]
+
+    chunks = []
+    i = 0
+    while i < len(turns):
+        # Acumular turnos hasta llenar el chunk_size
+        chunk_turns = []
+        size = len(header)
+        while i < len(turns) and size + len(turns[i]) <= chunk_size:
+            chunk_turns.append(turns[i])
+            size += len(turns[i])
+            i += 1
+        # Si no avanzó ni un turno (turno individual demasiado largo), incluirlo de todos modos
+        if not chunk_turns and i < len(turns):
+            chunk_turns.append(turns[i])
+            i += 1
+
+        chunks.append(header + "\n" + "".join(chunk_turns))
+
+        # Retroceder `overlap` turnos para el solapamiento
+        if i < len(turns):
+            i = max(i - overlap, i - len(chunk_turns) + 1, i - overlap)
+
+    return chunks if chunks else [text]
+
+
+def aggregate_chunk_features(chunk_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Combina los resultados de múltiples chunks en un único set de features.
+
+    Reglas semánticas de agregación:
+    - is_rpc, ptp_logrado     → OR  (basta detectarlo en cualquier chunk)
+    - num_objeciones          → SUM (cada objeción cuenta)
+    - num_objeciones_resueltas→ SUM, capped ≤ num_objeciones final
+    - alternativas_ofrecidas  → SUM (suma de todas las opciones ofrecidas)
+    - tono_predominante_agente→ MODE (tono más frecuente entre chunks)
+    - peticiones_aclaracion   → SUM (acumulado en toda la llamada)
+    - justificacion_breve     → primer chunk + " [...] " + último chunk
+    """
+    if not chunk_results:
+        raise ValueError("chunk_results está vacío; no hay features que agregar.")
+
+    if len(chunk_results) == 1:
+        return chunk_results[0]
+
+    is_rpc = any(c.get("is_rpc", False) for c in chunk_results)
+    ptp_logrado = any(c.get("ptp_logrado", False) for c in chunk_results)
+
+    num_obj = sum(c.get("num_objeciones", 0) for c in chunk_results)
+    num_res = sum(c.get("num_objeciones_resueltas", 0) for c in chunk_results)
+    num_res = min(num_res, num_obj)  # invariante del schema
+
+    alt = sum(c.get("alternativas_ofrecidas", 0) for c in chunk_results)
+    pet = sum(c.get("peticiones_aclaracion_cliente", 0) for c in chunk_results)
+
+    tonos = [c.get("tono_predominante_agente", "neutro_formal") for c in chunk_results]
+    tono = max(set(tonos), key=tonos.count)  # moda
+
+    just_first = chunk_results[0].get("justificacion_breve", "")
+    just_last = chunk_results[-1].get("justificacion_breve", "")
+    if just_first == just_last:
+        justificacion = just_first
+    else:
+        justificacion = f"{just_first} [...] {just_last}"
+
+    return {
+        "is_rpc": is_rpc,
+        "ptp_logrado": ptp_logrado,
+        "num_objeciones": num_obj,
+        "num_objeciones_resueltas": num_res,
+        "alternativas_ofrecidas": alt,
+        "tono_predominante_agente": tono,
+        "peticiones_aclaracion_cliente": pet,
+        "justificacion_breve": justificacion,
+    }
+
+
 # ── Extracción con LLM y Manejo de Caché ───────────────────────────────────────
 
 def extract_features_for_call(
@@ -178,10 +293,16 @@ def extract_features_for_call(
     api_key: str,
     model: str = DEFAULT_MODEL,
     force: bool = False,
-    max_retries: int = 5
+    max_retries: int = 12
 ) -> Dict[str, Any]:
     """
     Extrae variables semánticas para una llamada individual.
+
+    Para transcripts largos (> CHUNK_SIZE_CHARS), divide automáticamente
+    en chunks por turnos de diálogo y agrega los resultados con
+    aggregate_chunk_features(). La caché final almacena el resultado
+    ya agregado, idéntico al formato estándar.
+
     Si ya existe data/raw_features/{call_id}.json y no se usa force=True,
     carga desde caché y omite cualquier llamada a la API de Groq.
     """
@@ -191,11 +312,9 @@ def extract_features_for_call(
         try:
             with open(cache_file, "r", encoding="utf-8") as f:
                 cached = json.load(f)
-            # Validar con Pydantic para asegurar que la caché es consistente
             CallSemanticFeatures(**cached)
             return cached
         except Exception:
-            # Si el archivo en caché estaba corrupto, se recalcula
             pass
 
     transcript_file = TRANSCRIPTS_DIR / f"{call_id}.md"
@@ -204,61 +323,103 @@ def extract_features_for_call(
 
     transcript_content = transcript_file.read_text(encoding="utf-8")
 
-    user_prompt = f"A continuación se presenta la transcripción de la llamada `{call_id}`:\n\n{transcript_content}\n\nAnaliza y entrega el JSON con las variables requeridas."
+    # ── Chunking automático para transcripts largos ───────────────────────────
+    chunks = split_transcript_into_chunks(transcript_content)
+    if len(chunks) > 1:
+        print(f"  [chunking] {call_id}: {len(transcript_content):,} chars → {len(chunks)} chunks.")
 
-    headers = {
+    req_headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt}
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0.0,
-        "max_tokens": 400
-    }
 
-    last_err = None
-    for attempt in range(1, max_retries + 1):
+    def _call_llm(chunk_text: str, chunk_label: str) -> Dict[str, Any]:
+        """Llama al LLM con reintentos para un chunk dado."""
+        user_prompt = (
+            f"A continuación se presenta la transcripción de la llamada `{chunk_label}`:\n\n"
+            f"{chunk_text}\n\nAnaliza y entrega el JSON con las variables requeridas."
+        )
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.0,
+            "max_tokens": 1000
+        }
+        last_err = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = client.post(
+                    GROQ_API_URL,
+                    headers=req_headers,
+                    json=payload,
+                    timeout=60.0
+                )
+                if response.status_code == 200:
+                    res_json = response.json()
+                    content_str = res_json["choices"][0]["message"]["content"]
+                    parsed_data = json.loads(content_str)
+                    validated = CallSemanticFeatures(**parsed_data)
+                    return validated.model_dump()
+                elif response.status_code == 429:
+                    wait_time = 35.0
+                    try:
+                        err_data = response.json()
+                        err_msg = err_data.get("error", {}).get("message", "")
+                        import re
+                        m = re.search(r"try again in ([\d\.]+)s", err_msg)
+                        if m:
+                            wait_time = max(35.0, float(m.group(1)) + 15.0)
+                    except Exception:
+                        wait_time = max(35.0, attempt * 10.0)
+                    print(f"\n  [Rate Limit 429 en {chunk_label}] Esperando {wait_time:.1f}s para vaciar ventana TPM...")
+                    time.sleep(wait_time)
+                    last_err = f"Rate limit 429: {response.text}"
+                else:
+                    last_err = f"HTTP {response.status_code}: {response.text}"
+                    time.sleep(2)
+            except Exception as e:
+                last_err = str(e)
+                time.sleep(attempt * 2)
+        raise RuntimeError(f"Error en chunk '{chunk_label}' tras {max_retries} intentos: {last_err}")
+
+    # Procesar todos los chunks con persistencia incremental
+    chunks_cache_file = RAW_FEATURES_DIR / f"{call_id}_chunks_partial.json"
+    chunk_results = []
+    if chunks_cache_file.exists():
         try:
-            response = client.post(
-                GROQ_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=60.0
-            )
+            with open(chunks_cache_file, "r", encoding="utf-8") as f_chk:
+                chunk_results = json.load(f_chk)
+            print(f"  [resumiendo] Se recuperaron {len(chunk_results)}/{len(chunks)} chunks de caché parcial.")
+        except Exception:
+            chunk_results = []
 
-            if response.status_code == 200:
-                res_json = response.json()
-                content = res_json["choices"][0]["message"]["content"]
-                parsed_data = json.loads(content)
+    for idx in range(len(chunk_results), len(chunks)):
+        chunk_text = chunks[idx]
+        chunk_label = f"{call_id}_chunk{idx + 1}of{len(chunks)}" if len(chunks) > 1 else call_id
+        chunk_result = _call_llm(chunk_text, chunk_label)
+        chunk_results.append(chunk_result)
+        with open(chunks_cache_file, "w", encoding="utf-8") as f_chk:
+            json.dump(chunk_results, f_chk, ensure_ascii=False, indent=2)
+        if len(chunks) > 1 and idx < len(chunks) - 1:
+            time.sleep(25.0)  # Pausa preventiva para que los tokens acumulados en Groq caigan a 0
 
-                # Validar estrictamente con Pydantic
-                validated = CallSemanticFeatures(**parsed_data)
-                result_dict = validated.model_dump()
+    # Agregar resultados de todos los chunks y guardar en caché definitiva
+    result_dict = aggregate_chunk_features(chunk_results)
+    with open(cache_file, "w", encoding="utf-8") as f_out:
+        json.dump(result_dict, f_out, ensure_ascii=False, indent=2)
 
-                # Guardar en caché individual de inmediato
-                with open(cache_file, "w", encoding="utf-8") as f_out:
-                    json.dump(result_dict, f_out, ensure_ascii=False, indent=2)
+    # Limpiar caché parcial temporal
+    if chunks_cache_file.exists():
+        try:
+            chunks_cache_file.unlink()
+        except Exception:
+            pass
 
-                return result_dict
-
-            elif response.status_code == 429:
-                wait_time = attempt * 5
-                time.sleep(wait_time)
-                last_err = f"Rate limit 429: {response.text}"
-            else:
-                last_err = f"HTTP {response.status_code}: {response.text}"
-                time.sleep(2)
-
-        except Exception as e:
-            last_err = str(e)
-            time.sleep(attempt * 2)
-
-    raise RuntimeError(f"Error procesando {call_id} tras {max_retries} intentos: {last_err}")
+    return result_dict
 
 
 # ── Filtrado Granular de Tareas ────────────────────────────────────────────────
@@ -319,23 +480,14 @@ def resolve_target_calls(
 
 
 # ── Exclusión Metodológica de Llamadas Atípicas ──────────────────────────────
-# 'humano_43' se excluye deliberadamente por las siguientes razones técnicas y analíticas:
-# 1. Valor atípico extremo (outlier): Su duración es de 20 min 33 s (1,233.2 s) con
-#    más de 4,130 palabras (~11,500 tokens), superando en más de 5 desviaciones estándar
-#    la duración promedio del dataset (~180 s). Incluirla distorsionaría las pruebas
-#    paramétricas de duración y tiempos de habla.
-# 2. Restricción técnica de tokens (ITPM): Su volumen excede el límite de tokens de entrada
-#    por minuto (ITPM: 7,000 - 8,000) de los endpoints de LLM en el nivel estándar.
-# 3. Preservación del rigor: El análisis mantiene 99 llamadas íntegras (49 humanas vs. 50 IA),
-#    una muestra balanceada y representativa para contrastes no paramétricos y modelos logísticos.
-EXCLUDED_CALLS = {"humano_43"}
-EXCLUDED_CALLS_JUSTIFICATION = {
-    "humano_43": (
-        "Outlier extremo de duración (1,233.2 s / 20.5 min vs. media de ~180 s; >5 sigma) "
-        "y longitud textual (~11,500 tokens), superando límites de ITPM de la API y "
-        "con riesgo de sesgar desproporcionadamente las métricas acústico-temporales del grupo humano."
-    )
-}
+# 'humano_43' fue originalmente excluida por restricción técnica de tokens (ITPM ~7,000-8,000
+# de Groq) dado su volumen de ~11,500 tokens. Esta restricción fue RESUELTA mediante chunking
+# automático del transcript con agregación semántica de resultados (ver extract_features_for_call).
+# Para la distorsión acústica (duración 1,233.2 s / >5 sigma), se aplica Winsorización en
+# statistical_analysis.py sobre las pruebas de H5 (talk_ratio / duración).
+# La muestra queda balanceada: n=100 (50 humanos vs. 50 IA).
+EXCLUDED_CALLS: set = set()
+EXCLUDED_CALLS_JUSTIFICATION: dict = {}
 
 
 # ── Fusión con Datos Acústicos y Ensamble Final ────────────────────────────────

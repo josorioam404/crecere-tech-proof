@@ -141,6 +141,18 @@ def wilson_score_interval(successes: int, total: int, confidence: float = 0.95) 
     return float(p), float(lower), float(upper)
 
 
+def winsorize_series(data: np.ndarray, lower: float = 0.0, upper: float = 0.99) -> np.ndarray:
+    """
+    Aplica Winsorización sobre un array numérico en los percentiles especificados.
+    Mitiga el impacto de valores atípicos extremos preservando el tamaño muestral.
+    """
+    if len(data) == 0:
+        return data
+    q_low = float(np.percentile(data, lower * 100)) if lower > 0 else float(np.min(data))
+    q_high = float(np.percentile(data, upper * 100)) if upper < 1.0 else float(np.max(data))
+    return np.clip(data, q_low, q_high)
+
+
 # ── Módulo Principal de Análisis ──────────────────────────────────────────────
 
 class StatisticalAnalyzer:
@@ -187,7 +199,7 @@ class StatisticalAnalyzer:
     # ── Fase 0: Embudo Global y Contactabilidad ───────────────────────────────
 
     def analyze_funnel(self):
-        print("\n[1/7] Analizando Embudo Global y Contactabilidad (n = 99)...")
+        print(f"\n[1/7] Analizando Embudo Global y Contactabilidad (n = {len(self.raw_df)})...")
         total_humano = len(self.raw_df[self.raw_df["source"] == "humano"])
         total_ia = len(self.raw_df[self.raw_df["source"] == "ia"])
         
@@ -205,19 +217,26 @@ class StatisticalAnalyzer:
         chi2_stat, chi2_p, dof, _ = stats.chi2_contingency(table, correction=True)
         odds_ratio, fisher_p = stats.fisher_exact(table)
         
+        ptp_humano = int(self.rpc_df[self.rpc_df["source"] == "humano"]["ptp_logrado"].sum())
+        ptp_ia = int(self.rpc_df[self.rpc_df["source"] == "ia"]["ptp_logrado"].sum())
+
         self.results["funnel"] = {
             "total_calls": len(self.raw_df),
             "humanos": {
                 "total": total_humano,
                 "rpc_count": rpc_humano,
                 "rpc_rate": round(rate_h, 4),
-                "ci_95": [round(low_h, 4), round(up_h, 4)]
+                "ci_95": [round(low_h, 4), round(up_h, 4)],
+                "ptp_count": ptp_humano,
+                "ptp_rate_given_rpc": round(ptp_humano / rpc_humano, 4) if rpc_humano else 0.0
             },
             "ia": {
                 "total": total_ia,
                 "rpc_count": rpc_ia,
                 "rpc_rate": round(rate_ia, 4),
-                "ci_95": [round(low_ia, 4), round(up_ia, 4)]
+                "ci_95": [round(low_ia, 4), round(up_ia, 4)],
+                "ptp_count": ptp_ia,
+                "ptp_rate_given_rpc": round(ptp_ia / rpc_ia, 4) if rpc_ia else 0.0
             },
             "diff_pp": round((rate_h - rate_ia) * 100, 2),
             "chi2_stat": round(float(chi2_stat), 4),
@@ -447,17 +466,21 @@ class StatisticalAnalyzer:
         h_ratio = self.rpc_df[self.rpc_df["source"] == "humano"]["talk_ratio_agente"].values
         ia_ratio = self.rpc_df[self.rpc_df["source"] == "ia"]["talk_ratio_agente"].values
         
-        # Shapiro-Wilk
-        shapiro_h_stat, shapiro_h_p = stats.shapiro(h_ratio)
-        shapiro_ia_stat, shapiro_ia_p = stats.shapiro(ia_ratio)
+        # Aplicar Winsorización al percentil 99 para robustez paramétrica ante valores atípicos
+        h_ratio_w = winsorize_series(h_ratio, lower=0.0, upper=0.99)
+        ia_ratio_w = winsorize_series(ia_ratio, lower=0.0, upper=0.99)
+
+        # Shapiro-Wilk sobre series winsorizadas
+        shapiro_h_stat, shapiro_h_p = stats.shapiro(h_ratio_w)
+        shapiro_ia_stat, shapiro_ia_p = stats.shapiro(ia_ratio_w)
         
         # Welch's t-test unilateral (IA > Humanos)
-        t_stat, t_p_one = stats.ttest_ind(ia_ratio, h_ratio, equal_var=False, alternative="greater")
-        # Mann-Whitney U unilateral complementario
+        t_stat, t_p_one = stats.ttest_ind(ia_ratio_w, h_ratio_w, equal_var=False, alternative="greater")
+        # Mann-Whitney U unilateral complementario (sobre datos originales)
         u_stat, u_p_one = stats.mannwhitneyu(ia_ratio, h_ratio, alternative="greater")
         
-        # Cohen's d y Hedges' g
-        d, g, interp_g = compute_cohens_d(ia_ratio, h_ratio)
+        # Cohen's d y Hedges' g sobre series winsorizadas
+        d, g, interp_g = compute_cohens_d(ia_ratio_w, h_ratio_w)
         
         # Monopolización severa (ratio > 0.75)
         h_sev = int(np.sum(h_ratio > 0.75))
@@ -477,8 +500,8 @@ class StatisticalAnalyzer:
         self.results["h5_monopolizacion"] = {
             "humanos": {
                 "n": n_h,
-                "mean": round(float(np.mean(h_ratio)), 4),
-                "std": round(float(np.std(h_ratio, ddof=1)), 4),
+                "mean": round(float(np.mean(h_ratio_w)), 4),
+                "std": round(float(np.std(h_ratio_w, ddof=1)), 4),
                 "median": round(float(np.median(h_ratio)), 4),
                 "shapiro_p": float(shapiro_h_p),
                 "severe_monopolization_count": h_sev,
@@ -486,8 +509,8 @@ class StatisticalAnalyzer:
             },
             "ia": {
                 "n": n_ia,
-                "mean": round(float(np.mean(ia_ratio)), 4),
-                "std": round(float(np.std(ia_ratio, ddof=1)), 4),
+                "mean": round(float(np.mean(ia_ratio_w)), 4),
+                "std": round(float(np.std(ia_ratio_w, ddof=1)), 4),
                 "median": round(float(np.median(ia_ratio)), 4),
                 "shapiro_p": float(shapiro_ia_p),
                 "severe_monopolization_count": ia_sev,
@@ -501,7 +524,8 @@ class StatisticalAnalyzer:
             "hedges_g": round(g, 4),
             "effect_size_interpretation": interp_g,
             "severe_fisher_p_value": float(fisher_sev_p),
-            "h5_supported": bool(t_p_one < 0.05 and np.mean(ia_ratio) > np.mean(h_ratio))
+            "winsorization_note": "Winsorización al percentil 99 aplicada para mitigar distorsiones por valores atípicos",
+            "h5_supported": bool(t_p_one < 0.05 and np.mean(ia_ratio_w) > np.mean(h_ratio_w))
         }
         print(f"  • Talk Ratio Humanos: Media={np.mean(h_ratio):.1%}, Mediana={np.median(h_ratio):.1%}")
         print(f"  • Talk Ratio IA:      Media={np.mean(ia_ratio):.1%}, Mediana={np.median(ia_ratio):.1%}")
@@ -598,23 +622,23 @@ class StatisticalAnalyzer:
         
         md = f"""# Resultados Estadísticos y Econométricos: Humanos vs. IA en Cobranza
 
-Este documento consolida los contrastes de hipótesis, parámetros de significancia, tamaños de efecto y modelado econométrico multivariado a partir de la muestra de 99 llamadas procesadas.
+Este documento consolida los contrastes de hipótesis, parámetros de significancia, tamaños de efecto y modelado econométrico multivariado a partir de la muestra de {f['total_calls']} llamadas procesadas.
 
 ---
 
-## 1. Embudo Global y Contactabilidad (n = 99)
+## 1. Embudo Global y Contactabilidad (n = {f['total_calls']})
 
 * **Contactabilidad Humanos (RPC):** {f['humanos']['rpc_rate']:.1%} ({f['humanos']['rpc_count']}/{f['humanos']['total']}) [IC 95%: {f['humanos']['ci_95'][0]:.1%} - {f['humanos']['ci_95'][1]:.1%}]
 * **Contactabilidad IA (RPC):** {f['ia']['rpc_rate']:.1%} ({f['ia']['rpc_count']}/{f['ia']['total']}) [IC 95%: {f['ia']['ci_95'][0]:.1%} - {f['ia']['ci_95'][1]:.1%}]
 * **Brecha Bruta:** +{f['diff_pp']:.1f} p.p. a favor de humanos.
 * **Test de Independencia:** $\\chi^2 = {f['chi2_stat']:.2f}$ ($p = {f['chi2_p_value']:.4f}$), Test Exacto de Fisher $p = {f['fisher_p_value']:.4f}$, $\\text{{Odds Ratio}} = {f['odds_ratio']:.2f}$.
-* **Conclusión Metodológica:** Existe una disparidad significativa en el discado/contacto previo ($p < 0.05$). Para aislar la habilidad de negociación, comunicación y resolución de objeciones sin sesgo de selección, el análisis de hipótesis se conduce sobre las **$n = 60$ llamadas con contacto efectivo verificado** ($n_{{\\text{{humano}}}} = 36$, $n_{{\\text{{ia}}}} = 24$).
+* **Conclusión Metodológica:** Existe una disparidad significativa en el discado/contacto previo ($p < 0.05$). Para aislar la habilidad de negociación, comunicación y resolución de objeciones sin sesgo de selección, el análisis de hipótesis se conduce sobre las **$n = {h1['humanos']['n'] + h1['ia']['n']}$ llamadas con contacto efectivo verificado** ($n_{{\\text{{humano}}}} = {h1['humanos']['n']}$, $n_{{\\text{{ia}}}} = {h1['ia']['n']}$).
 
 ---
 
 ## 2. Matriz de Validación de las 5 Hipótesis
 
-| Hipótesis | Variable / Métrica | Humanos ($n=36$) | IA ($n=24$) | Estadístico de Contraste | Valor $p$ | Tamaño del Efecto | Veredicto |
+| Hipótesis | Variable / Métrica | Humanos ($n={h1['humanos']['n']}$) | IA ($n={h1['ia']['n']}$) | Estadístico de Contraste | Valor $p$ | Tamaño del Efecto | Veredicto |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **H1: Alternativas Ofrecidas**<br>*(Humanos > IA)* | `alternativas_ofrecidas` | Media: {h1['humanos']['mean']:.2f}<br>Mediana: {h1['humanos']['median']:.1f} (IQR: {h1['humanos']['iqr']:.1f}) | Media: {h1['ia']['mean']:.2f}<br>Mediana: {h1['ia']['median']:.1f} (IQR: {h1['ia']['iqr']:.1f}) | Mann-Whitney $U = {h1['mann_whitney_u']:.1f}$ | $p = {h1['p_value_one_sided']:.4e}$ | Cliff's $\\delta = {h1['cliffs_delta']:.3f}$<br>({h1['cliffs_delta_interpretation']}) | **{'CONFIRMADA' if h1['h1_supported'] else 'NO CONFIRMADA'}** |
 | **H2: Claridad del Mensaje**<br>*(IA > Humanos)* | `claridad_mensaje`<br>(0 repeticiones) | Media: {h2['humanos']['mean']:.3f}<br>% 0 rep: {h2['humanos']['prop_cero_repeticiones']:.1%} | Media: {h2['ia']['mean']:.3f}<br>% 0 rep: {h2['ia']['prop_cero_repeticiones']:.1%} | Mann-Whitney $U = {h2['mann_whitney_u']:.1f}$<br>Fisher %0rep | $p = {h2['p_value_one_sided']:.4f}$<br>$p = {h2['fisher_prop_cero_rep_p']:.4f}$ | Cliff's $\\delta = {h2['cliffs_delta']:.3f}$<br>({h2['cliffs_delta_interpretation']}) | **{'CONFIRMADA' if h2['h2_supported'] else 'NO CONFIRMADA'}** |
